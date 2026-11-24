@@ -1,0 +1,82 @@
+// Exact computation over Q(zeta)[t] for the two marked columns in FiveActiveColumnNormals.md.
+// Run: Singular -q check_five_root_shared_columns.sing
+ring R=(0,r),(t,z),dp;
+minpoly=r^4+r^3+r^2+r+1;
+matrix V[5][4];
+matrix q[5][1];
+matrix coordSum[1][4];
+matrix qDot[1][4];
+matrix H[4][4];
+matrix G[4][4];
+int i,j,k;
+number root;
+for(i=1;i<=5;i++){
+  root=r^(i-1);
+  q[i,1]=1+t*root;
+  if(i==1){q[i,1]=q[i,1]-5*r/(r-1);}
+  if(i==2){q[i,1]=q[i,1]+5/(r-1);}
+  for(j=1;j<=4;j++){
+    V[i,j]=root^j;
+    if(j==4){V[i,j]=V[i,j]-t;}
+    coordSum[1,j]=coordSum[1,j]+V[i,j];
+    qDot[1,j]=qDot[1,j]+q[i,1]*V[i,j];
+  }
+}
+for(j=1;j<=4;j++){
+  for(k=1;k<=4;k++){
+    H[j,k]=coordSum[1,j]*coordSum[1,k];
+    G[j,k]=-(coordSum[1,j]*qDot[1,k]+coordSum[1,k]*qDot[1,j])/2;
+    for(i=1;i<=5;i++){
+      H[j,k]=H[j,k]-V[i,j]*V[i,k];
+      G[j,k]=G[j,k]+q[i,1]*V[i,j]*V[i,k];
+    }
+  }
+}
+if(det(H)!=625){ERROR("Unexpected determinant of the four-dimensional Hessian.");}
+poly chi=det(G-z*H)/625;
+poly c0=subst(chi,z,0);
+chi=diff(chi,z); poly c1=subst(chi,z,0);
+chi=diff(chi,z); poly c2=subst(chi,z,0)/2;
+chi=diff(chi,z); poly c3=subst(chi,z,0)/6;
+poly linear=c3/2;
+poly constant=(c2-linear^2)/2;
+if(deg(gcd(2*linear*constant-c1,constant^2-c0))>0){
+  ERROR("The two characteristic square defects have a common zero.");
+}
+"Column determinant 625; characteristic square-defect gcd is 1.";
+
+proc coefficient(poly p,int order){
+  int i;
+  int f=1;
+  for(i=1;i<=order;i++){p=diff(p,z);f=f*i;}
+  return(subst(p,z,0)/f);
+}
+poly generating=1;
+for(i=1;i<=5;i++){generating=generating*(1+q[i,1]*z);}
+poly e3=coefficient(generating,3);
+poly e4=coefficient(generating,4);
+poly e5=coefficient(generating,5);
+if(deg(gcd(e3,e4))>0 || deg(gcd(e3,e5))>0 || deg(gcd(e4,e5))>0){
+  ERROR("Two different elementary pivots have a common zero.");
+}
+matrix deleted2[5][1];
+matrix deleted3[5][1];
+matrix inverse[5][5];
+poly partial;
+for(i=1;i<=5;i++){
+  partial=1;
+  for(j=1;j<=5;j++){if(i!=j){partial=partial*(1+q[j,1]*z);}}
+  deleted2[i,1]=coefficient(partial,2);
+  deleted3[i,1]=coefficient(partial,3);
+  for(j=1;j<=5;j++){
+    inverse[i,j]=1/4-(1-4*t*r^(i-1))*(1-4*t*r^(j-1))/20;
+    if(i==j){inverse[i,j]=inverse[i,j]-1;}
+  }
+}
+poly pair22=(transpose(deleted2)*inverse*deleted2)[1,1];
+poly pair23=(transpose(deleted2)*inverse*deleted3)[1,1];
+if(deg(gcd(e3,pair22))>0 || deg(gcd(e4,pair22))>0 || deg(gcd(e5,pair23))>0){
+  ERROR("A polarized pairing vanishes at a required resonance.");
+}
+"Three pairwise pivot gcds and all three polarized pairing gcds are 1.";
+quit;

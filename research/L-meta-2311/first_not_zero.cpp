@@ -1,0 +1,249 @@
+#include <algorithm>
+#include <array>
+#include <numeric>
+#include <set>
+#include <tuple>
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <utility>
+#include <vector>
+
+// Exhaustive separation search for the monotone edge function of the Petersen graph with vertex 9 deleted.
+// Each bit stands for one ordered pair (false input, true input).
+using Bits = std::array<std::uint64_t, 5>;
+struct Signal {
+    Bits at_false{}, at_true{}, separates{};
+};
+using Live = std::array<const Signal*, 16>;
+constexpr std::array<std::pair<int,int>,12> edges{{
+    {0,1},{1,2},{2,3},{3,4},{4,0},{0,5},{1,6},{2,7},{3,8},{5,7},{6,8},{8,5}
+}};
+
+bool target(int input) {
+    for (auto [i,j] : edges)
+        if ((input & (1<<i)) && (input & (1<<j))) return true;
+    return false;
+}
+
+std::vector<std::pair<int,int>> tests(bool monotone, bool literal) {
+    if (literal) {
+        std::vector<int> low, high;
+        for (int mask=0; mask<512; ++mask) {
+            bool value=target(mask), extremal=true;
+            for (int i=0; i<9; ++i) {
+                if (i==0 || bool(mask & (1<<i))!=value) continue;
+                if (target(mask^(1<<i))==value) extremal=false;
+            }
+            if (extremal) (value ? high : low).push_back(mask);
+        }
+        std::vector<std::pair<int,int>> pairs;
+        for (int x : low) for (int y : high) pairs.emplace_back(x,y);
+        assert(pairs.size()==208);
+        return pairs;
+    }
+    std::vector<std::pair<int,int>> pairs;
+    for (int input = 0; input < 512; ++input) {
+        if (target(input)) continue;
+        if (monotone) {
+            bool maximal = true;
+            for (int i = 0; i < 9; ++i)
+                if (!(input & (1<<i)) && !target(input | (1<<i))) maximal = false;
+            if (maximal) for (auto [i,j] : edges)
+                pairs.emplace_back(input, (1<<i) | (1<<j));
+        } else {
+            for (int i = 0; i < 9; ++i)
+                if (target(input ^ (1<<i))) pairs.emplace_back(input, input ^ (1<<i));
+        }
+    }
+    assert(pairs.size() == (monotone ? 144 : 258));
+    return pairs;
+}
+
+class Search {
+    const bool monotone;
+    const bool literal;
+    const int input_count;
+    const int block_count;
+    bool first_pair[10][10]{};
+    void first_pairs() {
+        std::array<int,9> perm;
+        std::iota(perm.begin(),perm.end(),0);
+        std::vector<std::array<int,9>> symmetries;
+        do {
+            if (literal && perm[0]!=0) continue;
+            bool valid=true;
+            for (auto [i,j] : edges)
+                if (!target((1<<perm[i])|(1<<perm[j]))) {valid=false; break;}
+            if (valid) symmetries.push_back(perm);
+        } while (std::next_permutation(perm.begin(),perm.end()));
+        assert(symmetries.size()==(literal ? 2 : 12));
+        for (int i=1; i<input_count; ++i) for (int j=0; j<i; ++j) {
+            std::pair<int,int> here{i,j}, best=here;
+            for (const auto& perm : symmetries) {
+                int a=i==9 ? 9 : perm[i], b=perm[j];
+                best=std::min(best,std::make_pair(std::max(a,b),std::min(a,b)));
+            }
+            first_pair[i][j]=(here==best);
+        }
+    }
+    const int limit;
+    Bits domain{};
+    std::array<Signal, 10> inputs;
+    std::array<Signal, 16> gates;
+    std::uint64_t states = 0;
+    std::array<std::array<int,3>,16> path{};
+    int used = 0;
+    int wire_id(const Signal* node) const {
+        for (int i = 0; i < input_count; ++i) if (node == &inputs[i]) return i;
+        for (int i = 0; i < 16; ++i) if (node == &gates[i]) return input_count+i;
+        std::abort();
+    }
+
+    void finish(Signal& signal) const {
+        // Every wire may be complemented for free in the relaxed circuit model.
+        bool invert = !monotone && (signal.at_false[0] & 1);
+        for (int k = 0; k < block_count; ++k) {
+            if (invert) {
+                signal.at_false[k] ^= domain[k];
+                signal.at_true[k] ^= domain[k];
+            }
+            signal.separates[k] = monotone
+                ? signal.at_true[k] & ~signal.at_false[k]
+                : signal.at_true[k] ^ signal.at_false[k];
+        }
+    }
+
+    static std::uint64_t operation(int op, std::uint64_t a, std::uint64_t b) {
+        switch (op) {
+        case 0: return a & b;
+        case 1: return a | b;
+        case 2: return a & ~b;
+        default: return ~a & b;
+        }
+    }
+
+    static bool same(const Signal& a, const Signal& b) {
+        return a.at_false == b.at_false && a.at_true == b.at_true;
+    }
+
+    bool previously_available(const Signal& signal, int depth) const {
+        for (int i=0; i<input_count; ++i) if (same(inputs[i],signal)) return true;
+        for (int g = 0; g < depth; ++g) if (same(gates[g], signal)) return true;
+        return false;
+    }
+
+    bool visit(const Live& live, int count, int remaining, int depth) {
+        ++states;
+        if (states % 10000000 == 0) std::cerr << states << " states" << std::endl;
+        if (!remaining || count > remaining + 1) return false;
+
+        // Forward/backward unions allow us to remove a chosen pair in O(block_count).
+        std::array<Bits, 17> prefix{}, suffix{};
+        for (int i = 0; i < count; ++i) for (int k = 0; k < block_count; ++k)
+            prefix[i+1][k] = prefix[i][k] | live[i]->separates[k];
+        for (int i = count-1; i >= 0; --i) for (int k = 0; k < block_count; ++k)
+            suffix[i][k] = suffix[i+1][k] | live[i]->separates[k];
+
+        for (int i = 1; i < count; ++i) {
+            Bits between{};
+            for (int j = i-1; j >= 0; --j) {
+                if (depth==0 && !first_pair[i][j]) {
+                    for (int k=0; k<block_count; ++k) between[k] |= live[j]->separates[k];
+                    continue;
+                }
+                const Signal& a = *live[i];
+                const Signal& b = *live[j];
+                Bits missing{};
+                for (int k = 0; k < block_count; ++k)
+                    missing[k] = domain[k] & ~(prefix[j][k] | between[k] | suffix[i+1][k]);
+                for (int op = 0; op < (monotone ? 2 : 4); ++op) {
+                    Signal& out = gates[depth];
+                    for (int k = 0; k < block_count; ++k) {
+                        out.at_false[k] = operation(op, a.at_false[k], b.at_false[k]);
+                        out.at_true[k] = operation(op, a.at_true[k], b.at_true[k]);
+                    }
+                    finish(out);
+                    path[depth] = {op,wire_id(&a),wire_id(&b)};
+                    if (out.at_false == Bits{} && out.at_true == domain) {
+                        used = depth+1;
+                        return true;
+                    }
+                    if ((out.at_false == Bits{} && out.at_true == Bits{}) ||
+                        (out.at_false == domain && out.at_true == domain) ||
+                        previously_available(out, depth)) continue;
+                    for (int keep = 0; keep < 4; ++keep) {
+                        bool keep_a = keep & 1, keep_b = keep & 2;
+                        int next_count = count - 1 + keep_a + keep_b;
+                        if (next_count > remaining) continue;
+                        bool feasible = true;
+                        for (int k = 0; k < block_count; ++k) {
+                            auto uncovered = missing[k] & ~out.separates[k];
+                            if (keep_a) uncovered &= ~a.separates[k];
+                            if (keep_b) uncovered &= ~b.separates[k];
+                            if (uncovered) { feasible = false; break; }
+                        }
+                        if (!feasible) continue;
+                        Live next;
+                        int n = 0;
+                        for (int t = 0; t < count; ++t)
+                            if ((t != i || keep_a) && (t != j || keep_b))
+                                next[n++] = live[t];
+                        next[n++] = &out;
+                        if (visit(next, n, remaining-1, depth+1)) return true;
+                    }
+                }
+                for (int k = 0; k < block_count; ++k) between[k] |= b.separates[k];
+            }
+        }
+        return false;
+    }
+
+public:
+    Search(bool mono, bool signed_literal, int bound, const std::vector<std::pair<int,int>>& pairs)
+        : monotone(mono), literal(signed_literal), input_count(signed_literal ? 10 : 9), block_count((pairs.size()+63)/64), limit(bound) {
+        first_pairs();
+        assert(block_count <= 5 && bound > 0 && bound <= 15);
+        for (std::size_t t = 0; t < pairs.size(); ++t) {
+            auto [lo,hi] = pairs[t];
+            auto bit = std::uint64_t(1) << (t%64);
+            domain[t/64] |= bit;
+            if (literal) {
+                if (!(lo & 1)) inputs[9].at_false[t/64] |= bit;
+                if (!(hi & 1)) inputs[9].at_true[t/64] |= bit;
+            }
+            for (int i = 0; i < 9; ++i) {
+                if (lo & (1<<i)) inputs[i].at_false[t/64] |= bit;
+                if (hi & (1<<i)) inputs[i].at_true[t/64] |= bit;
+            }
+        }
+        for (auto& input : inputs) finish(input);
+    }
+
+    bool run() {
+        Live live;
+        for (int i=0; i<input_count; ++i) live[i] = &inputs[i];
+        bool result = visit(live, input_count, limit, 0);
+        std::cout << (literal ? "first-literal" : (monotone ? "monotone" : "free-complements"))
+                  << " budget=" << limit << " states=" << states
+                  << " result=" << (result ? "SAT" : "UNSAT") << std::endl;
+        if (result && monotone) for (int k = 0; k < used; ++k)
+            std::cout << input_count+k << " " << (path[k][0] ? "OR" : "AND") << " "
+                      << path[k][1] << " " << path[k][2] << std::endl;
+        return result;
+    }
+};
+
+int main(int argc, char** argv) {
+    bool literal = argc == 3 && std::string(argv[1]) == "first-literal";
+    bool monotone = literal || (argc == 3 && std::string(argv[1]) == "monotone");
+    if (argc != 3 || (!monotone && std::string(argv[1]) != "free-complements")) {
+        std::cerr << "usage: separation monotone|first-literal|free-complements gate_budget\n";
+        return 2;
+    }
+    int budget = std::stoi(argv[2]);
+    if (budget <= 0 || budget > 15) return 2;
+    Search search(monotone, literal, budget, tests(monotone,literal));
+    search.run();
+}
